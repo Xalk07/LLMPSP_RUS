@@ -23,12 +23,45 @@ static unsigned char line_indent[MAX_WRAP_LINES];
 static int line_total;
 static int wrap_dirty = 1;
 
-static const char lower_keys[] =
-    "abcdefghijklmnopqrstuvwxyz0123456789.,!?'-_:;/()@#$%&*+=[]<>";
-static const char upper_keys[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?'-_:;/()@#$%&*+=[]<>";
+/*
+ * CP1251:
+ *   а-я = E0-FF
+ *   ё   = B8
+ *   А-Я = C0-DF
+ *   Ё   = A8
+ *
+ * В клавиатуре 4 * 15 = 60 ячеек.
+ * Поэтому в каждом массиве должно быть минимум 60 байт.
+ */
 
-const char *falcon_ui_keys(int upper) {
+static const char lower_keys[] =
+"\xE0\xE1\xE2\xE3\xE4\xE5\xB8\xE6\xE7\xE8\xE9\xEA\xEB\xEC\xED"
+"\xEE\xEF\xF0\xF1\xF2\xF3\xF4\xF5\xF6\xF7\xF8\xF9\xFA\xFB\xFC\xFD"
+"\xFE\xFF"
+"0123456789"
+".,!?'-_:;/()@#$%&*+="
+"[]<>";
+
+ static const char upper_keys[] =
+ "\xC0\xC1\xC2\xC3\xC4\xC5\xA8\xC6\xC7\xC8\xC9\xCA\xCB\xCC\xCD"
+ "\xCE\xCF\xD0\xD1\xD2\xD3\xD4\xD5\xD6\xD7\xD8\xD9\xDA\xDB\xDC\xDD"
+ "\xDE\xDF"
+ "0123456789"
+ ".,!?'-_:;/()@#$%&*+="
+ "[]<>";
+
+static const char *english_keys(int upper) {
+    static const char lower[] =
+    "abcdefghijklmnopqrstuvwxyz0123456789.,!?'-_:;/()@#$%&*+=[]<>";
+ static const char upper_keys_en[] =
+ "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?'-_:;/()@#$%&*+=[]<>";
+ return upper ? upper_keys_en : lower;
+}
+
+const char *falcon_ui_keys(int upper, int russian) {
+    if (!russian)
+        return english_keys(upper);
+
     return upper ? upper_keys : lower_keys;
 }
 
@@ -108,7 +141,9 @@ static void raw_append(const char *text, size_t length) {
         unsigned char c = (unsigned char)text[i];
         /* Keep newlines; fold every other control byte to a space so the
          * wrapper and the debug font never see anything unprintable. */
-        if (c != '\n' && (c < 32 || c >= 127)) c = ' ';
+        if (c != '\n' && c < 32)
+            c = ' ';
+
         transcript[transcript_length++] = (char)c;
     }
     transcript[transcript_length] = '\0';
@@ -129,7 +164,7 @@ static void drop_draft(void) {
 void falcon_ui_set_draft(const char *text) {
     drop_draft();
     if (committed_length) raw_append_str("\n");
-    raw_append_str("You: ");
+    raw_append_str("\xC2\xFB: "); /* Вы: */
     raw_append_str(text);
     raw_append_str("_");
 }
@@ -137,9 +172,9 @@ void falcon_ui_set_draft(const char *text) {
 void falcon_ui_commit_draft(const char *text) {
     drop_draft();
     if (committed_length) raw_append_str("\n");
-    raw_append_str("You: ");
+    raw_append_str("\xC2\xFB: "); /* Вы: */
     raw_append_str(text);
-    raw_append_str("\nAI: ");
+    raw_append_str("\n\xC8\xC8: "); /* ИИ: */
     committed_length = transcript_length;
 }
 
@@ -246,7 +281,7 @@ static void put_text(char *row, int column, const char *text, size_t length) {
     if (column < 0) column = 0;
     for (i = 0; i < length && column + (int)i < UI_COLS; ++i) {
         unsigned char c = (unsigned char)text[i];
-        row[column + (int)i] = (c >= 32 && c < 127) ? (char)c : '?';
+        row[column + (int)i] = (c >= 32) ? (char)c : '?';
     }
 }
 
@@ -292,7 +327,7 @@ static void compose_chat_rule(char *row, const FalconUiState *state) {
     int first = state->scroll;
     int last = first + UI_CHAT_ROWS;
     fill_rule(row, '-');
-    put_string(row, 0, "-- chat ");
+    put_string(row, 0, "-- \xF7\xE0\xF2 ");
     if (count > UI_CHAT_ROWS) {
         if (last > count) last = count;
         snprintf(right, sizeof(right), " %d-%d of %d %s%s ",
@@ -319,7 +354,7 @@ static void compose_chat(char grid[UI_ROWS][UI_COLS + 1],
 
 static void compose_keyboard(char grid[UI_ROWS][UI_COLS + 1],
                              const FalconUiState *state) {
-    const char *keys = falcon_ui_keys(state->upper);
+    const char *keys = falcon_ui_keys(state->upper, state->russian);
     int left = (UI_COLS - UI_KEY_COLUMNS * UI_KEY_CELL) / 2;
     int row, column;
     for (row = 0; row < UI_KEY_ROWS; ++row) {
@@ -350,23 +385,37 @@ void falcon_ui_compose(const FalconUiState *state,
     compose_chat(grid, state);
 
     fill_rule(grid[UI_ROW_SEP_KEYS], '-');
-    put_string(grid[UI_ROW_SEP_KEYS], 0,
-               state->upper ? "-- keyboard: UPPER " : "-- keyboard: lower ");
+    if (state->russian) {
+        put_string(grid[UI_ROW_SEP_KEYS], 0,
+                   state->upper
+                   ? "-- \xEA\xEB\xE0\xE2\xE8\xE0\xF2\xF3\xF0\xE0: \xD0\xD3\xD1 \xC7\xC0\xC3\xCB "
+                   : "-- \xEA\xEB\xE0\xE2\xE8\xE0\xF2\xF3\xF0\xE0: \xF0\xF3\xF1 \xF1\xF2\xF0\xEE\xF7 ");
+    } else {
+        put_string(grid[UI_ROW_SEP_KEYS], 0,
+                   state->upper
+                   ? "-- \xEA\xEB\xE0\xE2\xE8\xE0\xF2\xF3\xF0\xE0: ENG UPPER "
+                   : "-- \xEA\xEB\xE0\xE2\xE8\xE0\xF2\xF3\xF0\xE0: eng lower ");
+    }
     compose_keyboard(grid, state);
 
     if (state->busy) {
         /* Typing is blocked, so the controls give way to progress. */
-        put_string(grid[UI_ROW_HELP], 0, "O  stop the reply");
+        put_string(grid[UI_ROW_HELP], 0,
+                   "O  \xEE\xF1\xF2\xE0\xED\xEE\xE2\xE8\xF2\xFC \xEE\xF2\xE2\xE5\xF2");
         put_string(grid[UI_ROW_HELP + 1], 0,
                    state->status ? state->status : "");
     } else {
         put_string(grid[UI_ROW_TOPSTATUS], 0,
                    state->status ? state->status : "");
+        /* Keep within UI_COLS (67). L+R = layout switch. */
         put_string(grid[UI_ROW_HELP], 0,
-                   "X  add letter     []  space     /\\  backspace     "
-                   "L/R  case");
+                   "X \xE1\xF3\xEA\xE2\xE0  [] \xEF\xF0\xEE\xE1\xE5\xEB  "
+                   "/\\ \xF1\xF2\xE5\xF0\xE5\xF2\xFC  L/R \xF0\xE5\xE3\xE8\xF1\xF2\xF0  "
+                   "L+R \xF0\xE0\xF1\xEA\xEB\xE0\xE4\xEA\xE0");
         put_string(grid[UI_ROW_HELP + 1], 0,
-                   "START  send     SELECT  new chat     Stick  scroll     "
-                   "HOME  quit");
+                   "START \xEE\xF2\xEF\xF0\xE0\xE2\xE8\xF2\xFC  "
+                   "SELECT \xED\xEE\xE2\xFB\xE9 \xF7\xE0\xF2  "
+                   "Stick \xEF\xF0\xEE\xEA\xF0\xF3\xF2\xEA\xE0  "
+                   "HOME \xE2\xFB\xF5\xEE\xE4");
     }
 }

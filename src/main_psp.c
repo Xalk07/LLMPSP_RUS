@@ -1,5 +1,6 @@
 #include "falcon_h1.h"
 #include "falcon_ui.h"
+#include "cp1251_utf8.h"
 
 #include <pspctrl.h>
 #include <pspdebug.h>
@@ -221,6 +222,8 @@ static unsigned int turn_started_us;
 static unsigned int reply_started_us;
 static int reply_tokens;
 
+
+
 /* Runs for every layer of every token. The power tick and Circle poll
  * stay per-layer (cheap syscalls, and PROJECT.md requires the tick), but
  * the screen compose/blit and the synced trace write are throttled: the
@@ -242,7 +245,7 @@ static void inference_progress(int position, int layer,
         int total_steps = turn_prompt_tokens * total_layers;
         int done_steps = relative * total_layers +
                          (layer < total_layers ? layer : total_layers);
-        set_status("Prompt processing... %d%%",
+        set_status("\xCE\xE1\xF0\xE0\xE1\xEE\xF2\xEA\xE0 \xE7\xE0\xEF\xF0\xEE\xF1\xE0... %d%%",
                    total_steps ? 100 * done_steps / total_steps : 0);
     } else if (reply_tokens > 1) {
         /* The clock starts at the FIRST emitted token, so the rate is
@@ -251,10 +254,10 @@ static void inference_progress(int position, int layer,
         unsigned int elapsed = sceKernelGetSystemTimeLow() - reply_started_us;
         unsigned int tps_tenths = elapsed ?
             (unsigned)(reply_tokens - 1) * 10000000u / elapsed : 0;
-        set_status("Generating reply... %d words, %u.%u t/s",
+        set_status("\xC3\xE5\xED\xE5\xF0\xE0\xF6\xE8\xFF \xEE\xF2\xE2\xE5\xF2\xE0... %d \xF1\xEB\xEE\xE2, %u.%u \xF2/\xF1",
                    reply_tokens, tps_tenths / 10u, tps_tenths % 10u);
     } else {
-        set_status("Generating reply...");
+        set_status("\xC3\xE5\xED\xE5\xF0\xE0\xF6\xE8\xFF \xEE\xF2\xE2\xE5\xF2\xE0...");
     }
     ui_refresh();
     if (layer == 0 && relative % HEARTBEAT_TOKENS == 0) {
@@ -269,13 +272,76 @@ static unsigned int clock_us_hook(void) {
     return sceKernelGetSystemTimeLow();
 }
 
+/* Carry buffer for UTF-8 sequences split across token pieces.
+ * Cyrillic is 2 bytes; 4 bytes is enough headroom. */
+static uint8_t utf8_carry[8];
+static size_t utf8_carry_len;
+
+static void utf8_carry_reset(void) {
+    utf8_carry_len = 0;
+}
+
+/* Append new UTF-8 bytes, emit as many complete CP1251 chars as possible,
+ * leave any trailing incomplete sequence in utf8_carry. */
+static size_t utf8_stream_to_cp1251(const uint8_t *in, size_t in_len,
+                                   char *out, size_t out_size) {
+    size_t o = 0;
+
+    /* Append incoming bytes to the carry buffer (cap at sizeof) */
+    if (in_len > sizeof(utf8_carry) - utf8_carry_len)
+        in_len = sizeof(utf8_carry) - utf8_carry_len;
+    if (in_len) {
+        memcpy(utf8_carry + utf8_carry_len, in, in_len);
+        utf8_carry_len += in_len;
+    }
+
+    /* Decode complete sequences from the front */
+    size_t pos = 0;
+    while (pos < utf8_carry_len && o + 1 < out_size) {
+        uint32_t cp;
+        int n = utf8_decode(utf8_carry + pos, utf8_carry_len - pos, &cp);
+        if (n < 0) {
+            /* incomplete – stop, leave remainder in carry */
+            break;
+        }
+        if (n == 0) {
+            /* invalid lead – skip one byte */
+            ++pos;
+            continue;
+        }
+        pos += (size_t)n;
+        uint8_t b = unicode_to_cp1251(cp);
+        out[o++] = (char)(b ? b : '?');
+    }
+
+    /* Shift any remaining (incomplete) bytes to the start of carry */
+    if (pos > 0) {
+        utf8_carry_len -= pos;
+        if (utf8_carry_len)
+            memmove(utf8_carry, utf8_carry + pos, utf8_carry_len);
+    }
+
+    if (o < out_size) out[o] = '\0';
+    return o;
+}
+
 static int output_token(int token, const uint8_t *piece,
                         size_t piece_len, void *user) {
     SceCtrlData pad;
+    char cp1251_buf[256];
     (void)token; (void)user;
-    if (reply_tokens == 0) reply_started_us = sceKernelGetSystemTimeLow();
+    if (reply_tokens == 0) {
+        reply_started_us = sceKernelGetSystemTimeLow();
+        utf8_carry_reset(); /* new reply – discard any leftover */
+    }
     ++reply_tokens;
-    if (piece && piece_len) falcon_ui_append((const char *)piece, piece_len);
+    /* Model pieces are UTF-8 and may split multi-byte characters.
+     * Convert to CP1251 for the UI/font, carrying incomplete sequences. */
+    if (piece && piece_len) {
+        size_t n = utf8_stream_to_cp1251(piece, piece_len,
+                                         cp1251_buf, sizeof(cp1251_buf));
+        if (n) falcon_ui_append(cp1251_buf, n);
+    }
     scroll_to_end();
     ui_refresh();
     sceCtrlPeekBufferPositive(&pad, 1);
@@ -448,7 +514,9 @@ static void fatal_screen(const char *title, const char *detail) {
     pspDebugScreenClear();
     pspDebugScreenSetXY(0, 0);
     pspDebugScreenPrintf("Falcon-H1 Tiny 90M\n\n%s\n\n%s\n\n", title, detail);
-    pspDebugScreenPrintf("Press the PS/HOME button to quit.\n");
+    pspDebugScreenPrintf(
+        "\xCD\xE0\xE6\xEC\xE8 PS/HOME \xE4\xEB\xFF \xE2\xFB\xF5\xEE\xE4\xE0.\n");
+
     while (!exiting) {
         sceCtrlReadBufferPositive(&pad, 1);
         sceDisplayWaitVblankStart();
@@ -468,7 +536,18 @@ int main(int argc, char **argv) {
     int conv_position = 0, conv_pending = -1;
     int lock_rc, guard_rc, scroll_hold = 0, draft_changed = 0;
     unsigned int previous = 0;
+
     SceCtrlData pad;
+
+    unsigned int lr = PSP_CTRL_LTRIGGER | PSP_CTRL_RTRIGGER;
+
+    if ((pad.Buttons & lr) == lr &&
+        (previous & lr) != lr) {
+        ui_state.russian = !ui_state.russian;
+    ui_state.cursor = 0;
+    ui_shadow_valid = 0;
+    ui_refresh();
+        }
 
     setup_fpu();
     setup_callbacks();
@@ -481,13 +560,16 @@ int main(int argc, char **argv) {
      * suspending with CFW extra RAM in use is not survivable. */
     lock_rc = scePowerLock(0);
 
-    pspDebugScreenPrintf("Falcon-H1 Tiny 90M  v1.1\nStarting...\n");
+    /* Falcon-H1 Tiny 90M  v1.1
+     З апуск... */
+     pspDebugScreenPrintf("Falcon-H1 Tiny 90M  v1.1\n\xC7\xE0\xEF\xF3\xF1\xEA...\n");
     trace_open(argc, argv);
     if (!locate_model(model_path, sizeof(model_path), argc, argv)) {
         trace_line("[fail] model.fhq4 not found");
         trace_sync();
-        fatal_screen("model.fhq4 was not found next to EBOOT.PBP.",
-                     "Copy the whole LLMPSP folder to ms0:/PSP/GAME/.");
+        fatal_screen(
+             "model.fhq4 \xED\xE5 \xED\xE0\xE9\xE4\xE5\xED \xF0\xFF\xE4\xEE\xEC \xF1 EBOOT.PBP.",
+             "\xD1\xEA\xEE\xEF\xE8\xF0\xF3\xE9 \xEF\xE0\xEF\xEA\xF3 LLMPSP \xE2 ms0:/PSP/GAME/.");
         sceKernelExitGame();
         return 1;
     }
@@ -599,7 +681,7 @@ int main(int argc, char **argv) {
                    (unsigned)(cached / 1024),
                    model.weight_cache_blocks - holes, holes);
         trace_sync();
-        set_status("Ready. %u MiB cached, %u MiB streaming.",
+        set_status("\xC3\xEE\xF2\xEE\xE2\xEE. %u \xCC\xE8\xC1 \xE2 \xEA\xFD\xF8\xE5, %u \xCC\xE8\xC1 \xF1 \xE4\xE8\xF1\xEA\xE0.",
                    (unsigned)(cached / 1048576),
                    (unsigned)((model.file_size - model.weights_offset -
                                cached) / 1048576));
@@ -609,6 +691,7 @@ int main(int argc, char **argv) {
     falcon_ui_set_draft(prompt);
     ui_state.cursor = 0;
     ui_state.upper = 0;
+    ui_state.russian = 0;
     ui_state.context_total = model.config.context;
     ui_state.context_used = 0;
     ui_state.scroll = 0;
@@ -617,13 +700,29 @@ int main(int argc, char **argv) {
     ui_shadow_valid = 0;
     ui_refresh();
 
+
     while (!exiting) {
         unsigned int pressed;
+        unsigned int previous_buttons;
+        unsigned int lr = PSP_CTRL_LTRIGGER | PSP_CTRL_RTRIGGER;
         size_t prompt_length;
         int row, column;
+
         sceCtrlReadBufferPositive(&pad, 1);
-        pressed = pad.Buttons & ~previous;
-        previous = pad.Buttons;
+
+        previous_buttons = previous;
+        pressed = pad.Buttons & ~previous_buttons;
+
+        if ((pad.Buttons & lr) == lr &&
+            (previous_buttons & lr) != lr) {
+            ui_state.russian = !ui_state.russian;
+        ui_state.cursor = 0;
+        ui_shadow_valid = 0;
+        ui_refresh();
+            }
+
+            previous = pad.Buttons;
+
 
         row = ui_state.cursor / UI_KEY_COLUMNS;
         column = ui_state.cursor % UI_KEY_COLUMNS;
@@ -638,8 +737,10 @@ int main(int argc, char **argv) {
                                UI_KEY_COLUMNS) % UI_KEY_COUNT;
         if (pressed & PSP_CTRL_DOWN)
             ui_state.cursor = (ui_state.cursor + UI_KEY_COLUMNS) % UI_KEY_COUNT;
-        if (pressed & (PSP_CTRL_LTRIGGER | PSP_CTRL_RTRIGGER))
+        if ((pad.Buttons & lr) != lr &&
+            (pressed & (PSP_CTRL_LTRIGGER | PSP_CTRL_RTRIGGER))) {
             ui_state.upper = !ui_state.upper;
+            }
 
         /* Analog stick scrolls the transcript, repeating while held. */
         if (pad.Ly < 64 || pad.Ly > 192) {
@@ -657,7 +758,7 @@ int main(int argc, char **argv) {
         prompt_length = strlen(prompt);
         if ((pressed & PSP_CTRL_CROSS) && prompt_length + 1 < sizeof(prompt)) {
             prompt[prompt_length] =
-                falcon_ui_keys(ui_state.upper)[ui_state.cursor];
+                falcon_ui_keys(ui_state.upper, ui_state.russian)[ui_state.cursor];
             prompt[prompt_length + 1] = '\0';
             draft_changed = 1;
         }
@@ -678,7 +779,7 @@ int main(int argc, char **argv) {
             ui_state.scroll = 0;
             falcon_ui_reset();
             draft_changed = 1;
-            set_status("New conversation started.");
+            set_status("\xCD\xEE\xE2\xFB\xE9 \xF0\xE0\xE7\xE3\xEE\xE2\xEE\xF0 \xED\xE0\xF7\xE0\xF2.");
         }
         if (draft_changed) {
             falcon_ui_set_draft(prompt);
@@ -690,14 +791,18 @@ int main(int argc, char **argv) {
             int turn_tokens, max_new, generated = 0, ok;
             int next_position = 0, pending = -1;
             unsigned int elapsed, reply_elapsed;
+            char prompt_utf8[PROMPT_BYTES * 3]; /* worst-case expansion */
             if (!prompt[0]) {
-                set_status("Type a message first, then press START.");
+                set_status("\xD1\xED\xE0\xF7\xE0\xEB\xE0 \xE2\xE2\xE5\xE4\xE8\xF2\xE5 \xF1\xEE\xEE\xE1\xF9\xE5\xED\xE8\xE5, \xE7\xE0\xF2\xE5\xEC START.");
                 ui_refresh();
                 sceDisplayWaitVblankStart();
                 continue;
             }
+            /* UI stores CP1251; tokenizer expects UTF-8. */
+            cp1251_to_utf8(prompt, strlen(prompt),
+                           prompt_utf8, sizeof(prompt_utf8));
             if (conv_position == 0) {
-                turn_tokens = falcon_build_chat_prompt(&model, prompt,
+                turn_tokens = falcon_build_chat_prompt(&model, prompt_utf8,
                                                        tokens, TOKEN_CAPACITY);
             } else {
                 /* Continue the conversation: close the previous assistant
@@ -710,7 +815,7 @@ int main(int argc, char **argv) {
                 if (turn_tokens > 0 && turn_tokens < TOKEN_CAPACITY)
                     tokens[turn_tokens++] = model.config.im_start_id;
                 turn_tokens = append_tokens(&model, "user\n", tokens, turn_tokens);
-                turn_tokens = append_tokens(&model, prompt, tokens, turn_tokens);
+                turn_tokens = append_tokens(&model, prompt_utf8, tokens, turn_tokens);
                 if (turn_tokens > 0 && turn_tokens < TOKEN_CAPACITY)
                     tokens[turn_tokens++] = model.config.im_end_id;
                 turn_tokens = append_tokens(&model, "\n", tokens, turn_tokens);
@@ -720,7 +825,7 @@ int main(int argc, char **argv) {
                                             tokens, turn_tokens);
             }
             if (turn_tokens <= 0 || turn_tokens >= TOKEN_CAPACITY) {
-                set_status("That message is too long for the 512-token space.");
+                set_status("\xD1\xEE\xEE\xE1\xF9\xE5\xED\xE8\xE5 \xF1\xEB\xE8\xF8\xEA\xEE\xEC \xE4\xEB\xE8\xED\xED\xEE\xE5 \xE4\xEB\xFF 512 \xF2\xEE\xEA\xE5\xED\xEE\xE2.");
                 ui_refresh();
                 continue;
             }
@@ -728,7 +833,7 @@ int main(int argc, char **argv) {
             if (max_new > config.max_reply_tokens)
                 max_new = config.max_reply_tokens;
             if (max_new < 8) {
-                set_status("The conversation is full. SELECT starts a new one.");
+                set_status("\xCA\xEE\xED\xF2\xE5\xEA\xF1\xF2 \xE7\xE0\xEF\xEE\xEB\xED\xE5\xED. SELECT \x97 \xED\xEE\xE2\xFB\xE9 \xF0\xE0\xE7\xE3\xEE\xE2\xEE\xF0.");
                 ui_refresh();
                 continue;
             }
@@ -744,7 +849,7 @@ int main(int argc, char **argv) {
             stop_requested = 0;
             ui_state.busy = 1;
             scroll_to_end();
-            set_status("Prompt processing... 0%%");
+            set_status("\xCE\xE1\xF0\xE0\xE1\xEE\xF2\xEA\xE0 \xE7\xE0\xEF\xF0\xEE\xF1\xE0... 0%%");
             ui_refresh();
 
             trace_line("[stage] turn begin at %d, %d turn tokens, max_new %d",
@@ -803,18 +908,18 @@ int main(int argc, char **argv) {
             trace_power_state("turn end");
             trace_sync();
             if (!ok)
-                set_status("Could not read the model file. Conversation reset.");
+                set_status("\xCD\xE5 \xF3\xE4\xE0\xEB\xEE\xF1\xFC \xEF\xF0\xEE\xF7\xE8\xF2\xE0\xF2\xFC \xEC\xEE\xE4\xE5\xEB\xFC. \xD0\xE0\xE7\xE3\xEE\xE2\xEE\xF0 \xF1\xE1\xF0\xEE\xF8\xE5\xED.");
             else if (generated > 1) {
                 unsigned int tps_tenths = reply_elapsed ?
                     (unsigned)(generated - 1) * 10000000u / reply_elapsed : 0;
-                set_status("Done: %d words in %u s (%u.%u t/s). START sends next.",
+                set_status("\xC3\xEE\xF2\xEE\xE2\xEE: %d \xF1\xEB\xEE\xE2 \xE7\xE0 %u \xF1 (%u.%u \xF2/\xF1). START \xE4\xE0\xEB\xE5\xE5.",
                            generated, reply_elapsed / 1000000u,
                            tps_tenths / 10u, tps_tenths % 10u);
             }
             else if (generated == 1)
-                set_status("Done: 1 word. START sends the next message.");
+                set_status("\xC3\xEE\xF2\xEE\xE2\xEE: 1 \xF1\xEB\xEE\xE2\xEE. START \x97 \xF1\xEB\xE5\xE4\xF3\xFE\xF9\xE5\xE5 \xF1\xEE\xEE\xE1\xF9\xE5\xED\xE8\xE5.");
             else
-                set_status("The model had nothing to add. START sends next.");
+                set_status("\xCC\xEE\xE4\xE5\xEB\xFC \xED\xE8\xF7\xE5\xE3\xEE \xED\xE5 \xE4\xEE\xE1\xE0\xE2\xE8\xEB\xE0. START \x97 \xE4\xE0\xEB\xE5\xE5.");
             previous = pad.Buttons;
         }
 
