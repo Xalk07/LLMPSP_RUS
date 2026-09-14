@@ -1,5 +1,5 @@
 TARGET = LLMPSP
-OBJS = src/main_psp.o src/falcon_ui.o src/falcon_h1.o src/falcon_q4_psp.o src/falcon_prefetch_psp.o src/falcon_tokenizer.o src/falcon_sampler.o
+OBJS = src/main_psp.o src/falcon_ui.o src/falcon_h1.o src/falcon_q4_psp.o src/falcon_prefetch_psp.o src/falcon_tokenizer.o src/falcon_sampler.o src/font.o
 
 INCDIR = include
 # -fno-math-errno lets GCC inline sqrtf as a bare sqrt.s instruction; it
