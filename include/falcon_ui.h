@@ -45,6 +45,7 @@ extern "C" {
 typedef struct {
     int cursor;              /* selected key index */
     int upper;               /* shift state */
+    int russian;          /* 0 = English, 1 = Russian */
     const char *status;      /* status line text */
     int context_used;
     int context_total;
@@ -66,7 +67,8 @@ int falcon_ui_line_count(void);
 int falcon_ui_max_scroll(void);
 int falcon_ui_has_history(void);
 
-const char *falcon_ui_keys(int upper);
+/*const char *falcon_ui_keys(int upper);*/
+const char *falcon_ui_keys(int upper, int russian);
 
 /* Top pixel row of a grid row. Rows are 8 pixels tall and spaced with
  * extra leading, so this is not row * 8; see the layout note above.
